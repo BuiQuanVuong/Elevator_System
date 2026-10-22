@@ -13,7 +13,7 @@
  *   signal    - waits for SIGINT with sigwait() and starts shutdown
  */
 
-#include "common.h"
+#include "shared.h"
 
 #include <errno.h>
 #include <fcntl.h>

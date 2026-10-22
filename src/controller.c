@@ -15,7 +15,7 @@
  * way as sweep 0, and so on. Within a sweep the stops are in travel order.
  */
 
-#include "common.h"
+#include "shared.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
