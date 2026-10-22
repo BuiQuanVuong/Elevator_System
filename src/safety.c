@@ -78,6 +78,20 @@
  * D9  Other processes may change shared fields between this component's
  *     checks; all checks and corrections are therefore made while holding
  *     the mutex, and the state is re-checked after every wake-up.
+ * D10 Rule 22.10 - errno is tested after write() in write_text().
+ *     Justification: write() is an errno-setting function in POSIX, and
+ *     errno is read immediately after it returns -1, so the rule's intent is
+ *     met. MISRA's list of errno-setting functions only covers ISO C, so
+ *     the checker cannot see this. Checking for EINTR lets a message
+ *     interrupted by SIGINT still be written in full.
+ *
+ * STATIC ANALYSIS
+ * Checked with cppcheck 2.13 and its MISRA C:2012 addon:
+ *     cppcheck --addon=misra --library=posix --enable=all safety.c
+ * The only rule violations it reports are the documented deviations above
+ * (Rules 11.5, 21.5, 21.10, 22.10). Its "misra-config: Variable 'EINTR'
+ * is unknown" message is a limitation of the checker's POSIX
+ * configuration (it does not define that macro), not a fault in this code.
  * ---------------------------------------------------------------------------
  */
 
@@ -237,12 +251,12 @@ static bool valid_car_name(const char *name, size_t *length)
 static bool valid_floor(const char field[FLOOR_SIZE])
 {
   size_t length = bounded_length(field, FLOOR_SIZE);
-  size_t first_digit = 0U;
   bool valid = true;
 
   if ((length == 0U) || (length >= FLOOR_SIZE)) {
     valid = false;
   } else {
+    size_t first_digit = 0U;
     if (field[0] == 'B') {
       first_digit = 1U;
     }
@@ -474,7 +488,7 @@ int main(int argc, char *argv[])
       } else {
         write_text("Safety system failure: unable to use the car's shared memory.\n");
       }
-      if (munmap(car, sizeof(car_shared_mem)) != 0) {
+      if (munmap(car, sizeof(*car)) != 0) {
         status = EXIT_FAILED;
       }
       if (close(fd) != 0) {

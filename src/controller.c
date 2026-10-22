@@ -286,8 +286,6 @@ static void add_stop(car_t *car, int floor, int kind)
 
 static void remove_first_stop(car_t *car)
 {
-  int skipped;
-
   for (int i = 1; i < car->stop_count; i++) {
     car->stops[i - 1] = car->stops[i];
   }
@@ -295,7 +293,7 @@ static void remove_first_stop(car_t *car)
 
   /* Renumber so the first remaining stop is in sweep 0 */
   if (car->stop_count > 0 && car->stops[0].sweep > 0) {
-    skipped = car->stops[0].sweep;
+    int skipped = car->stops[0].sweep;
     if (skipped % 2 == 1) {
       car->first_dir = -car->first_dir;
     }
@@ -319,13 +317,13 @@ static void send_first_stop(car_t *car)
    the car's own connection thread. */
 static void send_pending_floor(car_t *car, int owner)
 {
-  char floor[4];
   char msg[16];
   int fd = -1;
 
   pthread_mutex_lock(&car->send_lock);
   pthread_mutex_lock(&lock);
   if (car->in_use && car->owner == owner && car->must_send) {
+    char floor[4];
     int_to_floor(car->commanded, floor);
     snprintf(msg, sizeof(msg), "FLOOR %s", floor);
     fd = car->fd;
@@ -365,14 +363,13 @@ static void handle_call(int fd, char *msg)
   int count = split(msg, words, MAX_WORDS);
   const char *reply = "UNAVAILABLE";
   int floor;
-  int dir;
-  car_t *car = NULL;
-  int owner = 0;
 
   if (count == 4 && strcmp(words[0], "CALL") == 0 && valid_car_name(words[1]) &&
       floor_to_int(words[2], &floor) &&
       (strcmp(words[3], "UP") == 0 || strcmp(words[3], "DOWN") == 0)) {
-    dir = (strcmp(words[3], "UP") == 0) ? 1 : -1;
+    int dir = (strcmp(words[3], "UP") == 0) ? 1 : -1;
+    int owner = 0;
+    car_t *car;
     pthread_mutex_lock(&lock);
     car = find_car(words[1]);
     if (car != NULL && car->ready && in_range(car, floor) &&
@@ -427,7 +424,7 @@ static bool car_message(car_t *car, char *msg)
   return false;
 }
 
-static void serve_car(connection_t *conn, char *registration)
+static void serve_car(const connection_t *conn, char *registration)
 {
   char *words[MAX_WORDS];
   int count = split(registration, words, MAX_WORDS);
@@ -589,7 +586,6 @@ int main(void)
 {
   static sigset_t sigint_set;
   pthread_t signal_thread;
-  int fd;
 
   /* Block SIGINT in every thread; the signal thread receives it with sigwait */
   sigemptyset(&sigint_set);
@@ -611,7 +607,7 @@ int main(void)
   }
 
   for (;;) {
-    fd = accept(listener, NULL, NULL);
+    int fd = accept(listener, NULL, NULL);
     pthread_mutex_lock(&lock);
     if (stopping) {
       if (fd != -1) {

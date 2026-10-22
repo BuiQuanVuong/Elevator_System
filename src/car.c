@@ -193,9 +193,8 @@ static void format_status(char msg[MSG_SIZE])
 /* Queue a STATUS message if the state differs from the last one queued */
 static void queue_status_if_changed(void)
 {
-  char msg[MSG_SIZE];
-
   if (car.connected && !car.mode_announced && !in_mode()) {
+    char msg[MSG_SIZE];
     format_status(msg);
     if (strcmp(msg, car.last_status_msg) != 0) {
       enqueue(msg);
@@ -412,8 +411,8 @@ static void run_car(void)
   char before[sizeof(car_shared_mem)];
   /* The fields from status to the end of the structure (everything except
      the mutex and condition variable), found with pointer arithmetic */
-  char *fields = shm->status;
-  size_t size = sizeof(car_shared_mem) - (size_t)(fields - (char *)shm);
+  const char *fields = shm->status;
+  size_t size = sizeof(car_shared_mem) - (size_t)(fields - (const char *)shm);
 
   pthread_mutex_lock(&shm->mutex);
   while (!car.shutting_down) {
