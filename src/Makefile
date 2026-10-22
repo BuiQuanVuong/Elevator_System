@@ -2,14 +2,14 @@ CC = gcc
 CFLAGS = -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic -pthread
 LDLIBS = -pthread -lrt
 
-# controller gets added here once it is written
-PROGRAMS = call internal safety car
+PROGRAMS = call internal safety car controller
 
 all: $(PROGRAMS)
 
 call: call.o common.o
 internal: internal.o common.o
 car: car.o common.o
+controller: controller.o common.o
 safety: safety.o   # safety-critical: self-contained, does not use common.c
 
 safety.o: safety.c

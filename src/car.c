@@ -213,6 +213,11 @@ static void observe_heartbeat(const struct timespec *now)
     car.heartbeat_time = *now;
     car.heartbeat_seen = true;
   }
+  /* Heartbeats seen during service or emergency mode do not count: after
+     the mode is cleared the car waits for a new one before reconnecting. */
+  if (in_mode()) {
+    car.heartbeat_seen = false;
+  }
 }
 
 /* Deadline for the next heartbeat change: every change gives 500 ms */
