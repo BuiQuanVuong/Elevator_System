@@ -1,0 +1,14 @@
+# Build outputs
+*.o
+src/call
+src/internal
+src/safety
+src/car
+src/controller
+
+# Built tester binaries (keep the sources)
+asgn2-testers/test/test-*
+!asgn2-testers/test/*.c
+asgn2-testers/test/display-cars
+test-claude/test-claude/test-*
+!test-claude/test-claude/*.c

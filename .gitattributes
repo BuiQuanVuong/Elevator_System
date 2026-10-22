@@ -1,0 +1,4 @@
+# Keep LF endings so sources and Makefiles build cleanly on Linux/WSL
+* text=auto eol=lf
+*.png binary
+*.gif binary
