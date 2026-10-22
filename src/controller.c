@@ -6,9 +6,17 @@
  * Listens on 127.0.0.1:3001. Every connection gets its own thread:
  *   - a hall call pad sends one CALL and gets ACCEPTED or UNAVAILABLE
  *   - a car sends CAR, then STATUS / SELECT / SERVICE / EMERGENCY
- * The car table (and every route) is protected by one mutex. The main
- * thread accepts connections and joins the threads that have finished; a
- * signal thread waits for SIGINT with sigwait() and shuts everything down.
+ * The main thread accepts connections and joins the threads that have
+ * finished; a signal thread waits for SIGINT with sigwait() and shuts
+ * everything down.
+ *
+ * Locking:
+ *   lock           - the car table (every field of every car_t, including
+ *                    routes) and the connection table
+ *   car->send_lock - sending FLOOR to that car. Held while send() runs so
+ *                    FLOORs go out in order and the car's socket is not
+ *                    closed mid-send; `lock` is never held during send().
+ *   Order: a thread holding a send_lock may take `lock`, never the reverse.
  *
  * Each car's route is a list of stops. Every stop belongs to a sweep:
  * sweep 0 travels in first_dir, sweep 1 the opposite way, sweep 2 the same
@@ -50,10 +58,12 @@ typedef struct
   int current;      /* from the latest STATUS */
   int target;
   char status[8];
-  int commanded;    /* floor in the last FLOOR sent, 0 if none */
+  int commanded;    /* floor in the last FLOOR decided, 0 if none */
+  bool must_send;   /* FLOOR commanded has not been sent yet */
   int first_dir;    /* direction of sweep 0: +1 up, -1 down */
   int stop_count;
   stop_t stops[MAX_STOPS];
+  pthread_mutex_t send_lock; /* see "Locking" above */
 } car_t;
 
 typedef struct
@@ -65,7 +75,7 @@ typedef struct
   pthread_t thread;
 } connection_t;
 
-static pthread_mutex_t lock; /* initialised in main */
+static pthread_mutex_t lock; /* see "Locking" above; initialised in main */
 static car_t cars[MAX_CARS];
 static connection_t connections[MAX_CONNECTIONS];
 static int listener = -1;
@@ -154,6 +164,7 @@ static car_t *register_car(const char *name, int lowest, int highest, const conn
     car->target = lowest;
     car->status[0] = '\0';
     car->commanded = 0;
+    car->must_send = false;
     car->first_dir = 1;
     car->stop_count = 0;
   }
@@ -294,17 +305,37 @@ static void remove_first_stop(car_t *car)
   }
 }
 
-/* Sends FLOOR for the first stop. Called with the lock held; a failed send
-   is noticed by the car's own connection thread. */
+/* Decides to send FLOOR for the first stop. Called with `lock` held; the
+   message itself is sent later by send_pending_floor() without `lock`. */
 static void send_first_stop(car_t *car)
+{
+  car->commanded = car->stops[0].floor;
+  car->must_send = true;
+}
+
+/* Sends the car's pending FLOOR, if any. Must be called WITHOUT `lock`.
+   If several FLOORs were decided in the meantime only the latest is sent,
+   since each one replaces the car's target. A failed send is noticed by
+   the car's own connection thread. */
+static void send_pending_floor(car_t *car, int owner)
 {
   char floor[4];
   char msg[16];
+  int fd = -1;
 
-  int_to_floor(car->stops[0].floor, floor);
-  snprintf(msg, sizeof(msg), "FLOOR %s", floor);
-  (void)send_msg(car->fd, msg);
-  car->commanded = car->stops[0].floor;
+  pthread_mutex_lock(&car->send_lock);
+  pthread_mutex_lock(&lock);
+  if (car->in_use && car->owner == owner && car->must_send) {
+    int_to_floor(car->commanded, floor);
+    snprintf(msg, sizeof(msg), "FLOOR %s", floor);
+    fd = car->fd;
+    car->must_send = false;
+  }
+  pthread_mutex_unlock(&lock);
+  if (fd != -1) {
+    (void)send_msg(fd, msg);
+  }
+  pthread_mutex_unlock(&car->send_lock);
 }
 
 /* Adds a request and sends FLOOR if the first stop now needs commanding */
@@ -335,7 +366,8 @@ static void handle_call(int fd, char *msg)
   const char *reply = "UNAVAILABLE";
   int floor;
   int dir;
-  car_t *car;
+  car_t *car = NULL;
+  int owner = 0;
 
   if (count == 4 && strcmp(words[0], "CALL") == 0 && valid_car_name(words[1]) &&
       floor_to_int(words[2], &floor) &&
@@ -346,9 +378,13 @@ static void handle_call(int fd, char *msg)
     if (car != NULL && car->ready && in_range(car, floor) &&
         !(dir > 0 && floor == car->highest) && !(dir < 0 && floor == car->lowest)) {
       request(car, floor, dir);
+      owner = car->owner;
       reply = "ACCEPTED";
     }
     pthread_mutex_unlock(&lock);
+    if (owner != 0) {
+      send_pending_floor(car, owner);
+    }
   }
   (void)send_msg(fd, reply);
 }
@@ -423,14 +459,21 @@ static void serve_car(connection_t *conn, char *registration)
     }
     pthread_mutex_unlock(&lock);
     free(msg);
+    if (keep) {
+      send_pending_floor(car, conn->id);
+    }
   }
 
-  /* The car and its whole route go, unless a newer connection owns it */
+  /* The car and its whole route go, unless a newer connection owns it.
+     Taking send_lock first means no other thread is sending on this
+     connection when the caller closes it. */
+  pthread_mutex_lock(&car->send_lock);
   pthread_mutex_lock(&lock);
   if (car->in_use && car->owner == conn->id) {
     car->in_use = false;
   }
   pthread_mutex_unlock(&lock);
+  pthread_mutex_unlock(&car->send_lock);
 }
 
 /* ----------------------------------------------------------- connections */
@@ -553,6 +596,9 @@ int main(void)
   sigaddset(&sigint_set, SIGINT);
   pthread_sigmask(SIG_BLOCK, &sigint_set, NULL);
   pthread_mutex_init(&lock, NULL);
+  for (int i = 0; i < MAX_CARS; i++) {
+    pthread_mutex_init(&cars[i].send_lock, NULL);
+  }
 
   listener = open_listener();
   if (listener == -1) {
