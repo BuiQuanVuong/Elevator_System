@@ -19,7 +19,6 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
-#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -403,10 +402,13 @@ static void step(const struct timespec *now)
 
 static void run_car(void)
 {
+  static const char watchdog_message[] = "Safety system disconnected! Entering emergency mode.\n";
   car_shared_mem *shm = car.shm;
   char before[sizeof(car_shared_mem)];
-  size_t from = offsetof(car_shared_mem, status);
-  size_t size = sizeof(car_shared_mem) - from;
+  /* The fields from status to the end of the structure (everything except
+     the mutex and condition variable), found with pointer arithmetic */
+  char *fields = shm->status;
+  size_t size = sizeof(car_shared_mem) - (size_t)(fields - (char *)shm);
 
   pthread_mutex_lock(&shm->mutex);
   while (!car.shutting_down) {
@@ -416,7 +418,7 @@ static void run_car(void)
     bool print_watchdog = false;
 
     clock_gettime(CLOCK_MONOTONIC, &now);
-    memcpy(before, (char *)shm + from, size);
+    memcpy(before, fields, size);
 
     observe_heartbeat(&now);
     if (car.connected && shm->emergency_mode == 0 && car.heartbeat_seen) {
@@ -429,14 +431,14 @@ static void run_car(void)
 
     step(&now);
     queue_status_if_changed();
-    if (memcmp(before, (char *)shm + from, size) != 0) {
+    if (memcmp(before, fields, size) != 0) {
       pthread_cond_broadcast(&shm->cond);
     }
 
     if (print_watchdog) {
+      /* write() is unbuffered, so the message is seen straight away */
       pthread_mutex_unlock(&shm->mutex);
-      printf("Safety system disconnected! Entering emergency mode.\n");
-      fflush(stdout);
+      (void)write(STDOUT_FILENO, watchdog_message, sizeof(watchdog_message) - 1);
       pthread_mutex_lock(&shm->mutex);
       continue;
     }
@@ -469,7 +471,8 @@ static void *receive_commands(void *arg)
   while ((msg = recv_msg(fd)) != NULL) {
     /* Only "FLOOR {floor}" with a floor in range is accepted; anything else
        is ignored. */
-    if (strncmp(msg, "FLOOR ", 6) == 0 && floor_to_int(msg + 6, &floor) && in_range(floor)) {
+    if (strlen(msg) > 6 && memcmp(msg, "FLOOR ", 6) == 0 && floor_to_int(msg + 6, &floor) &&
+        in_range(floor)) {
       pthread_mutex_lock(&car.shm->mutex);
       car.floor_cmd = floor;
       car.has_floor_cmd = true;

@@ -34,7 +34,7 @@
  *
  * DOCUMENTED DEVIATIONS
  * D1  Dir 1.1 / Rule 1.1 - Use of POSIX interfaces that are not part of
- *     ISO C: shm_open, mmap, munmap, fstat, close, write, sigaction,
+ *     ISO C: shm_open, mmap, munmap, close, write, sigaction,
  *     clock_gettime and process-shared pthread mutex/condition variables.
  *     Justification: the specification requires POSIX shared memory and
  *     process-shared synchronisation; there is no ISO C alternative. Each
@@ -51,9 +51,11 @@
  *     used.
  * D4  Rule 11.5 - The void pointer returned by mmap is converted to a
  *     pointer to car_shared_mem.
- *     Justification: this is the only way to access a mapped object. The
- *     object's size is checked with fstat before mapping, and mmap returns
- *     page-aligned memory, so the alignment is correct for the structure.
+ *     Justification: this is the only way to access a mapped object. mmap
+ *     returns page-aligned memory, so the alignment is correct for the
+ *     structure. The object's size is not checked separately (that would
+ *     need fstat, which is outside the techniques used in this unit); the
+ *     car creates the object with ftruncate to exactly this size.
  * D5  Rule 8.9 / Rule 8.4 - stop_requested has file scope.
  *     Justification: it is shared between the signal handler and the main
  *     loop, so it cannot be a block-scope object. It has internal linkage.
@@ -88,7 +90,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
@@ -423,20 +424,16 @@ static bool install_sigint_handler(void)
 }
 
 /* Opens and maps an existing car object. Returns NULL if it does not exist
-   or is too small to hold the structure. */
+   or cannot be mapped. */
 static car_shared_mem *open_car(const char *shm_name, int *fd)
 {
   car_shared_mem *car = NULL;
-  struct stat info;
 
   *fd = shm_open(shm_name, O_RDWR, 0);
   if (*fd >= 0) {
-    if ((fstat(*fd, &info) == 0) && (info.st_size >= (off_t)sizeof(car_shared_mem))) {
-      void *mapping = mmap(NULL, sizeof(car_shared_mem), PROT_READ | PROT_WRITE, MAP_SHARED,
-                           *fd, 0);
-      if (mapping != MAP_FAILED) {
-        car = (car_shared_mem *)mapping; /* D4 */
-      }
+    void *mapping = mmap(NULL, sizeof(car_shared_mem), PROT_READ | PROT_WRITE, MAP_SHARED, *fd, 0);
+    if (mapping != MAP_FAILED) {
+      car = (car_shared_mem *)mapping; /* D4 */
     }
     if (car == NULL) {
       (void)close(*fd);

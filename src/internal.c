@@ -43,8 +43,7 @@ static int apply(car_shared_mem *shm, const char *op, const char *floor_arg)
       return 0;
     }
     /* TODO: wording of the next two messages is not confirmed by the spec */
-    if (strcmp(shm->status, "Between") == 0 ||
-        strcmp(shm->current_floor, shm->target_floor) != 0) {
+    if (strcmp(shm->status, "Between") == 0) {
       printf("Operation not allowed while elevator is moving.\n");
       return 0;
     }

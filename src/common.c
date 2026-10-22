@@ -176,8 +176,8 @@ int connect_controller(void)
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_port = htons(CONTROLLER_PORT);
-  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
+  if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1 ||
+      connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
     close(fd);
     return -1;
   }
