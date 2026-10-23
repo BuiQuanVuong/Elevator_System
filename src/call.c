@@ -18,7 +18,7 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  /* Validate everything before touching the network */
+  /* Validate before connecting */
   if (!valid_car_name(argv[1])) {
     printf("Invalid car name.\n");
     return 1;

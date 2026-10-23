@@ -9,7 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* ---------- Floors ---------- */
+/* FLOORS */
 
 int floor_to_int(const char *s, int *out)
 {
@@ -21,7 +21,7 @@ int floor_to_int(const char *s, int *out)
     sign = -1;
     i = 1;
   }
-  /* First digit must be 1-9: rejects "", "0", leading zeroes */
+  /* Rejects "", "0" and leading zeroes */
   if (s[i] < '1' || s[i] > '9') {
     return 0;
   }
@@ -66,7 +66,7 @@ int next_floor(int floor, int dir, int *out)
   return 1;
 }
 
-/* ---------- Car names ---------- */
+/* CAR NAMES */
 
 int valid_car_name(const char *s)
 {
@@ -88,7 +88,7 @@ int valid_car_name(const char *s)
   return 1;
 }
 
-/* ---------- Network messages: 32-bit length prefix + ASCII ---------- */
+/* NETWORK MESSAGES (32-bit length prefix, then the text) */
 
 static int send_all(int fd, const void *buf, size_t len)
 {

@@ -1,98 +1,52 @@
 /*
- * safety.c - Safety system for one elevator car (SAFETY-CRITICAL COMPONENT)
- *
+ * safety.c - Safety system for one elevator car (SAFETY-CRITICAL)
  * Usage: ./safety {car name}
  *
- * Opens the car's shared memory object /cab403_car_{car name} (it never
- * creates or unlinks it), increments safety_heartbeat every 100 ms and,
- * whenever the shared state changes, applies these rules in order:
- *   1. door_obstruction is 1 while status is Closing -> status = Opening
- *   2. emergency_stop is 1 and not in emergency mode -> report, enter
- *      emergency mode, reset emergency_stop
- *   3. overload is 1 and not in emergency mode       -> report, enter
- *      emergency mode
- *   4. not in emergency mode and the data is inconsistent -> report
- *      "Data consistency error!", enter emergency mode
+ * Opens /cab403_car_{name} (never creates or unlinks it), increments
+ * safety_heartbeat every 100 ms and, on every change, applies in order:
+ *   1. obstruction while Closing          -> Opening
+ *   2. emergency_stop, not in emergency   -> report, emergency mode, reset
+ *   3. overload, not in emergency         -> report, emergency mode
+ *   4. inconsistent data, not in emergency -> report, emergency mode
  *
- * ---------------------------------------------------------------------------
- * SAFETY-CRITICAL PRACTICE
- * This file follows MISRA C:2012 as far as the required functionality
- * allows. In particular:
- *   - No dynamic memory allocation (Dir 4.12, Rule 21.3) and no recursion
- *     (Rule 17.2).
- *   - Every value read from shared memory is external data and is fully
- *     validated before use (Dir 4.14). Strings are never assumed to be
- *     NUL-terminated: every length is bounded by the size of its field.
- *   - The return value of every system and library call that can fail is
- *     checked (Rule 17.7, Dir 4.7).
- *   - Fixed-width types, unsigned constants with a U suffix, braces on every
- *     body, boolean controlling expressions, no assignments inside
- *     conditions, every if/else-if chain ends in else, and every function
- *     has a single point of exit (Rules 14.4, 13.4, 15.6, 15.7, 15.5).
- *   - Objects are declared at the narrowest scope possible; everything
- *     except main has internal linkage (Rules 8.7, 8.9).
+ * SAFETY-CRITICAL PRACTICE (MISRA C:2012)
+ *   - No dynamic memory or recursion (Dir 4.12, Rules 21.3, 17.2).
+ *   - All shared memory is validated before use; strings are never assumed
+ *     to be NUL-terminated (Dir 4.14).
+ *   - Every return value that can signal failure is checked (Rule 17.7).
+ *   - Fixed-width types, U suffixes, braces on every body, boolean
+ *     conditions, no assignments in conditions, final else, single exit
+ *     (Rules 14.4, 13.4, 15.6, 15.7, 15.5).
+ *   - Narrowest scope; internal linkage except main (Rules 8.7, 8.9).
  *
- * DOCUMENTED DEVIATIONS
- * D1  Dir 1.1 / Rule 1.1 - Use of POSIX interfaces that are not part of
- *     ISO C: shm_open, mmap, munmap, close, write, sigaction,
- *     clock_gettime and process-shared pthread mutex/condition variables.
- *     Justification: the specification requires POSIX shared memory and
- *     process-shared synchronisation; there is no ISO C alternative. Each
- *     call's result is checked and failure leads to a reported, orderly exit.
- * D2  Rule 21.5 - <signal.h> is used.
- *     Justification: the component must end cleanly on SIGINT (Ctrl+C) so
- *     that it never exits while holding the shared mutex. The handler only
- *     stores to a volatile sig_atomic_t, which is async-signal-safe. The
- *     main loop wakes at least every heartbeat period (100 ms) to see it.
- * D3  Rule 21.10 - <time.h> is used.
- *     Justification: clock_gettime(CLOCK_MONOTONIC) is needed for absolute
- *     heartbeat deadlines that are not affected by wall-clock changes or by
- *     unrelated condition-variable wake-ups. No calendar/date functions are
- *     used.
- * D4  Rule 11.5 - The void pointer returned by mmap is converted to a
- *     pointer to car_shared_mem.
- *     Justification: this is the only way to access a mapped object. mmap
- *     returns page-aligned memory, so the alignment is correct for the
- *     structure. The object's size is not checked separately (that would
- *     need fstat, which is outside the techniques used in this unit); the
- *     car creates the object with ftruncate to exactly this size.
- * D5  Rule 8.9 / Rule 8.4 - stop_requested has file scope.
- *     Justification: it is shared between the signal handler and the main
- *     loop, so it cannot be a block-scope object. It has internal linkage.
- * D6  Rule 21.6 is followed by NOT using <stdio.h>: output goes through
- *     write() (covered by D1), which is unbuffered, so required diagnostic
- *     messages reach the reader immediately without fflush. If writing a
- *     message fails, the safety action has already been taken; the failure
- *     is not otherwise reportable and is deliberately ignored.
- * D7  Rule 10.x (essential type model) / unsigned wraparound -
- *     safety_heartbeat is a uint32_t sequence counter that is expected to
- *     wrap from UINT32_MAX to 0. Unsigned wraparound is well defined and is
- *     intentional here; readers compare it for inequality only.
- * D8  Shared mutex robustness - The mutex is created by the car with the
- *     attributes fixed by the specification (not PTHREAD_MUTEX_ROBUST). If
- *     another process dies while holding it, this component blocks in
- *     pthread_mutex_lock. This cannot be corrected here without changing
- *     the car's initialisation, which the specification fixes. The car's
- *     own heartbeat watchdog detects the resulting loss of heartbeat and
- *     enters emergency mode, which is the intended fail-safe behaviour.
- * D9  Other processes may change shared fields between this component's
- *     checks; all checks and corrections are therefore made while holding
- *     the mutex, and the state is re-checked after every wake-up.
- * D10 Rule 22.10 - errno is tested after write() in write_text().
- *     Justification: write() is an errno-setting function in POSIX, and
- *     errno is read immediately after it returns -1, so the rule's intent is
- *     met. MISRA's list of errno-setting functions only covers ISO C, so
- *     the checker cannot see this. Checking for EINTR lets a message
- *     interrupted by SIGINT still be written in full.
+ * DEVIATIONS
+ * D1  Dir 1.1 - POSIX calls (shm_open, mmap, write, sigaction,
+ *     clock_gettime, process-shared mutex/condvar) are required by the
+ *     specification. Every result is checked.
+ * D2  Rule 21.5 - <signal.h>, needed for a clean SIGINT exit. The handler
+ *     only sets a volatile sig_atomic_t; the loop checks it every 100 ms.
+ * D3  Rule 21.10 - <time.h>, needed for CLOCK_MONOTONIC deadlines. No
+ *     calendar functions are used.
+ * D4  Rule 11.5 - mmap's void * is cast to car_shared_mem *. mmap memory is
+ *     page-aligned; the car sizes the object with ftruncate.
+ * D5  Rule 8.9 - stop_requested has file scope, as the handler and main
+ *     loop share it.
+ * D6  No <stdio.h> (Rule 21.6): write() is unbuffered, so messages appear
+ *     immediately. A failed write is ignored, as the safety action has
+ *     already been taken.
+ * D7  safety_heartbeat wraps from UINT32_MAX to 0 on purpose; readers only
+ *     compare it for inequality.
+ * D8  The mutex is not robust (its attributes are fixed by the spec). If
+ *     another process dies holding it, this process blocks and the car's
+ *     watchdog enters emergency mode.
+ * D9  Other processes may change fields at any time, so every check and
+ *     correction is made with the mutex held and repeated after each wake.
+ * D10 Rule 22.10 - errno is tested after write(), which POSIX defines as
+ *     errno-setting. EINTR is retried so SIGINT doesn't cut a message.
  *
- * STATIC ANALYSIS
- * Checked with cppcheck 2.13 and its MISRA C:2012 addon:
- *     cppcheck --addon=misra --library=posix --enable=all safety.c
- * The only rule violations it reports are the documented deviations above
- * (Rules 11.5, 21.5, 21.10, 22.10). Its "misra-config: Variable 'EINTR'
- * is unknown" message is a limitation of the checker's POSIX
- * configuration (it does not define that macro), not a fault in this code.
- * ---------------------------------------------------------------------------
+ * Checked with: cppcheck --addon=misra --library=posix --enable=all safety.c
+ * It reports only Rules 11.5, 21.5, 21.10 and 22.10 (above), plus a
+ * checker config note that EINTR is undefined.
  */
 
 #include <errno.h>
@@ -150,7 +104,7 @@ typedef enum
   REPORT_DATA_ERROR
 } report_t;
 
-/* Set by the SIGINT handler, read by the main loop (see D2, D5) */
+/* D2, D5 */
 static volatile sig_atomic_t stop_requested = 0;
 
 static void on_sigint(int signal_number)
@@ -159,10 +113,9 @@ static void on_sigint(int signal_number)
   stop_requested = 1;
 }
 
-/* ------------------------------------------------------------------ output */
+/* OUTPUT */
 
-/* Writes a NUL-terminated string to standard output, retrying partial
-   writes and interrupted calls. A failed write cannot be reported (D6). */
+/* Retries partial and interrupted writes (D6, D10) */
 static void write_text(const char *text)
 {
   const char *position = text;
@@ -175,7 +128,7 @@ static void write_text(const char *text)
       position = &position[written];
       remaining -= (size_t)written;
     } else if ((written < 0) && (errno == EINTR)) {
-      /* interrupted before anything was written: try again */
+      /* retry */
     } else {
       failed = true;
     }
@@ -195,15 +148,14 @@ static void print_report(report_t report)
     write_text("Data consistency error!\n");
     break;
   default:
-    /* REPORT_NONE: nothing to print */
+    /* REPORT_NONE */
     break;
   }
 }
 
-/* ---------------------------------------------------------------- validation */
+/* VALIDATION */
 
-/* Length of a string stored in a fixed-size field; returns size if the
-   field contains no NUL terminator. */
+/* Returns size if the field has no NUL */
 static size_t bounded_length(const char *field, size_t size)
 {
   size_t length = 0U;
@@ -224,8 +176,7 @@ static bool is_alphanumeric(char c)
   return ((c >= 'a') && (c <= 'z')) || ((c >= 'A') && (c <= 'Z')) || is_digit(c);
 }
 
-/* Car name: 1-31 letters, digits, underscores or hyphens; the first
-   character must be a letter or digit. Sets *length on success. */
+/* 1-31 letters, digits, '_' or '-', starting with a letter or digit */
 static bool valid_car_name(const char *name, size_t *length)
 {
   size_t count = 0U;
@@ -246,8 +197,7 @@ static bool valid_car_name(const char *name, size_t *length)
   return valid;
 }
 
-/* Canonical floor: "B1".."B99" or "1".."999", NUL-terminated within the
-   4-byte field, no leading zeroes, signs, spaces or trailing characters. */
+/* "B1".."B99" or "1".."999", no leading zeroes, NUL within the field */
 static bool valid_floor(const char field[FLOOR_SIZE])
 {
   size_t length = bounded_length(field, FLOOR_SIZE);
@@ -275,7 +225,6 @@ static bool valid_floor(const char field[FLOOR_SIZE])
   return valid;
 }
 
-/* True if the status field holds exactly the given word */
 static bool status_is(const char field[STATUS_SIZE], const char *word)
 {
   return (bounded_length(field, STATUS_SIZE) < STATUS_SIZE) && (strcmp(field, word) == 0);
@@ -307,18 +256,16 @@ static bool data_is_consistent(const car_shared_mem *car)
   return consistent;
 }
 
-/* --------------------------------------------------------------- the rules */
+/* RULES */
 
-/* Applies the four rules in order. The caller must hold the mutex.
-   Only an emergency_mode of exactly 1 counts as being in emergency mode, so
-   any other value is caught as a data consistency error by rule 4.
-   Sets *changed if shared memory was modified. */
+/* Mutex held. Only emergency_mode == 1 counts as emergency mode, so any
+   other value is caught by rule 4. */
 static report_t apply_rules(car_shared_mem *car, bool *changed)
 {
   report_t report = REPORT_NONE;
 
   if ((car->door_obstruction == 1U) && status_is(car->status, "Closing")) {
-    (void)memcpy(car->status, "Opening", sizeof("Opening")); /* 8 bytes incl. NUL */
+    (void)memcpy(car->status, "Opening", sizeof("Opening"));
     *changed = true;
   }
 
@@ -336,12 +283,12 @@ static report_t apply_rules(car_shared_mem *car, bool *changed)
     report = REPORT_DATA_ERROR;
     *changed = true;
   } else {
-    /* already in emergency mode, or nothing wrong */
+    /* nothing to do */
   }
   return report;
 }
 
-/* ------------------------------------------------------------------- timing */
+/* TIMING */
 
 static void add_nanoseconds(struct timespec *time, long nanoseconds)
 {
@@ -358,11 +305,9 @@ static bool time_reached(const struct timespec *now, const struct timespec *dead
          ((now->tv_sec == deadline->tv_sec) && (now->tv_nsec >= deadline->tv_nsec));
 }
 
-/* -------------------------------------------------------------- main loop */
+/* MAIN LOOP */
 
-/* Runs until SIGINT. Holds the mutex while checking and changing shared
-   memory, releases it while waiting and while printing. Returns false if a
-   clock or synchronisation call fails. */
+/* Runs until SIGINT; false if a clock or pthread call fails */
 static bool run_safety(car_shared_mem *car)
 {
   struct timespec now;
@@ -382,14 +327,13 @@ static bool run_safety(car_shared_mem *car)
 
     ok = (clock_gettime(CLOCK_MONOTONIC, &now) == 0);
     if (ok) {
-      /* Heartbeat on a fixed absolute schedule: wake-ups never restart it */
+      /* Fixed schedule: other wake-ups don't delay it */
       if (time_reached(&now, &deadline)) {
-        car->safety_heartbeat++; /* wraps intentionally (D7) */
+        car->safety_heartbeat++; /* D7 */
         changed = true;
         add_nanoseconds(&deadline, HEARTBEAT_PERIOD_NS);
         if (time_reached(&now, &deadline)) {
-          /* fell more than a period behind (e.g. mutex held by another
-             process): restart the schedule instead of bursting */
+          /* fell behind: restart rather than burst */
           deadline = now;
           add_nanoseconds(&deadline, HEARTBEAT_PERIOD_NS);
         }
@@ -401,7 +345,7 @@ static bool run_safety(car_shared_mem *car)
     }
 
     if (ok && (report != REPORT_NONE)) {
-      /* Print without holding the mutex, then re-check before waiting */
+      /* Print unlocked, then re-check before waiting */
       ok = (pthread_mutex_unlock(&car->mutex) == 0);
       if (ok) {
         locked = false;
@@ -415,7 +359,7 @@ static bool run_safety(car_shared_mem *car)
       int result = pthread_cond_timedwait(&car->cond, &car->mutex, &deadline);
       ok = (result == 0) || (result == ETIMEDOUT);
     } else {
-      /* stopping, or an error occurred */
+      /* stopping or failed */
     }
   }
 
@@ -425,7 +369,7 @@ static bool run_safety(car_shared_mem *car)
   return ok;
 }
 
-/* ------------------------------------------------------------------- setup */
+/* SETUP */
 
 static bool install_sigint_handler(void)
 {
@@ -437,8 +381,7 @@ static bool install_sigint_handler(void)
   return (sigemptyset(&action.sa_mask) == 0) && (sigaction(SIGINT, &action, NULL) == 0);
 }
 
-/* Opens and maps an existing car object. Returns NULL if it does not exist
-   or cannot be mapped. */
+/* NULL if the object doesn't exist or can't be mapped */
 static car_shared_mem *open_car(const char *shm_name, int *fd)
 {
   car_shared_mem *car = NULL;

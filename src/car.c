@@ -1,16 +1,12 @@
 /*
  * car.c - Controls one elevator car.
- *
  * Usage: ./car {name} {delay} {lowest floor} {highest floor}
  *
- * Threads (all private state below is protected by the shared mutex, and
- * every thread waits on the shared condition variable):
- *   main      - door and movement state machine, passenger requests and
- *               the safety heartbeat watchdog
- *   network   - connects to the controller and sends queued messages
- *               (never holds the mutex while blocked on the network)
- *   receiver  - reads FLOOR commands from the controller
- *   signal    - waits for SIGINT with sigwait() and starts shutdown
+ * Threads, sharing the car's mutex and condition variable:
+ *   main     - door/movement state machine and heartbeat watchdog
+ *   network  - connects to the controller and sends queued messages
+ *   receiver - reads FLOOR commands
+ *   signal   - sigwait() for SIGINT
  */
 
 #include "shared.h"
@@ -44,12 +40,12 @@ static struct
   long delay_ms;
 
   /* State machine (main thread only) */
-  char phase[9];              /* status the phase timer belongs to */
-  struct timespec phase_end;  /* when the current phase finishes */
+  char phase[9];
+  struct timespec phase_end;
   bool moving;
-  int moving_to;              /* floor being travelled to while Between */
+  int moving_to;
 
-  /* Shared between threads - protected by shm->mutex */
+  /* Protected by shm->mutex */
   bool shutting_down;
   bool has_floor_cmd;         /* FLOOR received, not yet applied */
   int floor_cmd;
@@ -59,7 +55,7 @@ static struct
   bool connected;
   int fd;
   bool receiver_done;
-  bool mode_announced;        /* SERVICE/EMERGENCY queued for this connection */
+  bool mode_announced;        /* SERVICE/EMERGENCY queued */
   char last_status_msg[MSG_SIZE];
   char queue[QUEUE_SIZE][MSG_SIZE];
   int queue_head;
@@ -68,7 +64,7 @@ static struct
 
 static pthread_t receiver_thread;
 
-/* ------------------------------------------------------------- time helpers */
+/* TIME */
 
 static void now_plus_ms(struct timespec *t, long ms)
 {
@@ -107,10 +103,9 @@ static const struct timespec *earlier(const struct timespec *a, const struct tim
   return time_reached(a, b) ? b : a;
 }
 
-/* --------------------------------------------------------- shared memory */
+/* SHARED MEMORY */
 
-/* Fields in shared memory may be written by other processes and are not
-   guaranteed to be NUL-terminated, so always copy them before parsing. */
+/* Other processes may leave a field without a NUL, so copy before parsing */
 static bool read_floor_field(const char field[4], int *floor)
 {
   char text[5];
@@ -154,15 +149,16 @@ static bool in_mode(void)
   return car.shm->service_mode == 1 || car.shm->emergency_mode == 1;
 }
 
-/* Valid, in-range passenger request waiting in the mailbox */
 static bool valid_request(int *floor)
 {
   return car.shm->floor_request_pending == 1 &&
          read_floor_field(car.shm->floor_request, floor) && in_range(*floor);
 }
 
-/* ---------------------------------------------------------- message queue */
+/* MESSAGE QUEUE */
 
+/* Drops the message if the queue is full. No broadcast: the main thread
+   broadcasts after every state change. */
 static void enqueue(const char *msg)
 {
   if (car.queue_count < QUEUE_SIZE) {
@@ -170,10 +166,6 @@ static void enqueue(const char *msg)
     snprintf(car.queue[tail], MSG_SIZE, "%s", msg);
     car.queue_count++;
   }
-  /* A full queue means the controller has stopped reading; the message is
-     dropped rather than blocking the car. No broadcast is needed here: the
-     main thread broadcasts after any state change, and the network thread
-     (the only reader) queues its own messages. */
 }
 
 static void format_status(char msg[MSG_SIZE])
@@ -190,7 +182,6 @@ static void format_status(char msg[MSG_SIZE])
   snprintf(msg, MSG_SIZE, "STATUS %s %s %s", current, target, status);
 }
 
-/* Queue a STATUS message if the state differs from the last one queued */
 static void queue_status_if_changed(void)
 {
   if (car.connected && !car.mode_announced && !in_mode()) {
@@ -203,7 +194,7 @@ static void queue_status_if_changed(void)
   }
 }
 
-/* -------------------------------------------------------------- heartbeat */
+/* HEARTBEAT */
 
 static void observe_heartbeat(const struct timespec *now)
 {
@@ -212,14 +203,12 @@ static void observe_heartbeat(const struct timespec *now)
     car.heartbeat_time = *now;
     car.heartbeat_seen = true;
   }
-  /* Heartbeats seen during service or emergency mode do not count: after
-     the mode is cleared the car waits for a new one before reconnecting. */
+  /* Heartbeats during a mode don't count towards reconnecting */
   if (in_mode()) {
     car.heartbeat_seen = false;
   }
 }
 
-/* Deadline for the next heartbeat change: every change gives 500 ms */
 static void watchdog_deadline(struct timespec *t)
 {
   *t = car.heartbeat_time;
@@ -237,14 +226,13 @@ static bool heartbeat_fresh(const struct timespec *now)
   return !time_reached(now, &deadline);
 }
 
-/* ------------------------------------------------------ the state machine */
+/* STATE MACHINE */
 
 static bool phase_is(const char *name)
 {
   return strcmp(car.phase, name) == 0;
 }
 
-/* Changes the status and starts the timer for the new phase */
 static void set_phase(const char *name)
 {
   snprintf(car.shm->status, sizeof(car.shm->status), "%s", name);
@@ -252,7 +240,7 @@ static void set_phase(const char *name)
   now_plus_ms(&car.phase_end, car.delay_ms);
 }
 
-/* Only these phases end by themselves. In service mode the doors stay open. */
+/* In service mode the doors stay open */
 static bool phase_has_end(void)
 {
   if (phase_is("Open")) {
@@ -272,14 +260,13 @@ static void start_move(int target)
   }
 }
 
-/* Doors are closed: decide whether to move or open */
 static void decide_when_closed(void)
 {
   int current = current_floor();
   int target;
 
   if (car.shm->service_mode == 1) {
-    /* Technician moves the car by setting target_floor. */
+    /* The technician moves the car by setting target_floor */
     if (!read_floor_field(car.shm->target_floor, &target) || !in_range(target)) {
       set_target(current);
     } else if (target != current) {
@@ -291,7 +278,7 @@ static void decide_when_closed(void)
     car.has_floor_cmd = false;
     if (car.floor_cmd == current) {
       set_target(current);
-      set_phase("Opening"); /* FLOOR for the current floor opens the doors */
+      set_phase("Opening");
     } else {
       start_move(car.floor_cmd);
     }
@@ -311,9 +298,8 @@ static void arrive(void)
   set_current(car.moving_to);
 
   if (in_mode()) {
-    /* Stop at this floor: forget the target and pending commands.
-       TODO (open question 2): in service mode a target more than one floor
-       away is treated as "move one floor", then the target is reset. */
+    /* TODO (open question 2): a service target more than one floor away
+       moves one floor, then the target is reset. */
     set_target(car.moving_to);
     car.has_floor_cmd = false;
     set_phase("Closed");
@@ -331,18 +317,16 @@ static void arrive(void)
   if (target == car.moving_to) {
     set_phase("Opening");
   } else {
-    start_move(target); /* keep going (or turn round) without stopping */
+    start_move(target);
   }
 }
 
-/* The current phase's delay has passed */
 static void finish_phase(void)
 {
   if (phase_is("Opening")) {
     set_phase("Open");
   } else if (phase_is("Open")) {
-    /* TODO (open question 1): doors also close automatically in emergency
-       mode; only service mode keeps them open. */
+    /* TODO (open question 1): doors also close by themselves in emergency mode */
     set_phase("Closing");
   } else if (phase_is("Closing")) {
     set_phase("Closed");
@@ -352,14 +336,13 @@ static void finish_phase(void)
   }
 }
 
-/* One pass of the state machine. Called with the mutex held. */
+/* Mutex held */
 static void step(const struct timespec *now)
 {
   char status[9];
   int floor;
 
-  /* Someone else changed the status (e.g. safety reopening the doors):
-     that phase starts now. */
+  /* Status changed by another process, e.g. safety reopening the doors */
   read_status(status);
   if (strcmp(status, car.phase) != 0) {
     snprintf(car.phase, sizeof(car.phase), "%s", status);
@@ -371,8 +354,7 @@ static void step(const struct timespec *now)
     }
   }
 
-  /* Modes discard passenger and controller requests; invalid requests are
-     discarded straight away. */
+  /* Requests are discarded in a mode, and when invalid */
   if (in_mode()) {
     car.shm->floor_request_pending = 0;
     car.has_floor_cmd = false;
@@ -402,15 +384,14 @@ static void step(const struct timespec *now)
   }
 }
 
-/* ----------------------------------------------------------- main thread */
+/* MAIN THREAD */
 
 static void run_car(void)
 {
   static const char watchdog_message[] = "Safety system disconnected! Entering emergency mode.\n";
   car_shared_mem *shm = car.shm;
   char before[sizeof(car_shared_mem)];
-  /* The fields from status to the end of the structure (everything except
-     the mutex and condition variable), found with pointer arithmetic */
+  /* Every field after the mutex and condition variable */
   const char *fields = shm->status;
   size_t size = sizeof(car_shared_mem) - (size_t)(fields - (const char *)shm);
 
@@ -440,7 +421,6 @@ static void run_car(void)
     }
 
     if (print_watchdog) {
-      /* write() is unbuffered, so the message is seen straight away */
       pthread_mutex_unlock(&shm->mutex);
       (void)write(STDOUT_FILENO, watchdog_message, sizeof(watchdog_message) - 1);
       pthread_mutex_lock(&shm->mutex);
@@ -464,7 +444,7 @@ static void run_car(void)
   pthread_mutex_unlock(&shm->mutex);
 }
 
-/* -------------------------------------------------------- receiver thread */
+/* RECEIVER THREAD */
 
 static void *receive_commands(void *arg)
 {
@@ -473,8 +453,7 @@ static void *receive_commands(void *arg)
   int floor;
 
   while ((msg = recv_msg(fd)) != NULL) {
-    /* Only "FLOOR {floor}" with a floor in range is accepted; anything else
-       is ignored. */
+    /* Anything other than an in-range FLOOR is ignored */
     if (strlen(msg) > 6 && memcmp(msg, "FLOOR ", 6) == 0 && floor_to_int(msg + 6, &floor) &&
         in_range(floor)) {
       pthread_mutex_lock(&car.shm->mutex);
@@ -493,9 +472,9 @@ static void *receive_commands(void *arg)
   return NULL;
 }
 
-/* --------------------------------------------------------- network thread */
+/* NETWORK THREAD */
 
-/* Called with the mutex held */
+/* Mutex held */
 static void start_connection(int fd)
 {
   static int receiver_fd;
@@ -517,11 +496,11 @@ static void start_connection(int fd)
   if (pthread_create(&receiver_thread, NULL, receive_commands, &receiver_fd) != 0) {
     car.receiver_done = true; /* treat as an immediate disconnection */
   }
-  /* Wake the main thread so it starts timing the heartbeat watchdog */
+  /* Wakes main to start the watchdog */
   pthread_cond_broadcast(&car.shm->cond);
 }
 
-/* Called with the mutex held; releases it while waiting for the receiver */
+/* Mutex held; released while joining the receiver */
 static void drop_connection(void)
 {
   int fd = car.fd;
@@ -536,7 +515,7 @@ static void drop_connection(void)
   pthread_mutex_lock(&car.shm->mutex);
 }
 
-/* Sends one message without holding the mutex. Called with it held. */
+/* Mutex held; released during the send */
 static bool send_unlocked(const char *msg)
 {
   char copy[MSG_SIZE];
@@ -550,7 +529,7 @@ static bool send_unlocked(const char *msg)
   return result == 0;
 }
 
-/* One step while connected. Called with the mutex held. */
+/* Mutex held */
 static void serve_connection(void)
 {
   int floor;
@@ -577,7 +556,7 @@ static void serve_connection(void)
     if (!send_unlocked(msg)) {
       drop_connection();
     } else {
-      /* Clear the mailbox only once the request has been sent */
+      /* Cleared only once sent */
       car.shm->floor_request_pending = 0;
       pthread_cond_broadcast(&car.shm->cond);
     }
@@ -624,7 +603,7 @@ static void *network(void *unused)
   return NULL;
 }
 
-/* ---------------------------------------------------------- signal thread */
+/* SIGNAL THREAD */
 
 static void *wait_for_sigint(void *arg)
 {
@@ -643,9 +622,9 @@ static void *wait_for_sigint(void *arg)
   return NULL;
 }
 
-/* ---------------------------------------------------------------- start-up */
+/* START-UP */
 
-/* Canonical whole number from 1 to 60000 */
+/* 1 to 60000, no leading zeroes */
 static bool parse_delay(const char *text, long *delay)
 {
   long value = 0;
@@ -732,7 +711,7 @@ static bool create_shared_memory(void)
   pthread_cond_init(&shm->cond, &cond_attr);
   pthread_condattr_destroy(&cond_attr);
 
-  /* Every other field is already 0 from ftruncate */
+  /* ftruncate zeroes every other field */
   strcpy(shm->status, "Closed");
   strcpy(shm->current_floor, car.lowest_text);
   strcpy(shm->target_floor, car.lowest_text);
@@ -750,7 +729,7 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  /* Block SIGINT in every thread; the signal thread receives it with sigwait */
+  /* Blocked in every thread; the signal thread takes it with sigwait */
   sigemptyset(&sigint_set);
   sigaddset(&sigint_set, SIGINT);
   pthread_sigmask(SIG_BLOCK, &sigint_set, NULL);
@@ -769,7 +748,7 @@ int main(int argc, char *argv[])
     return 1;
   }
 
-  run_car(); /* returns after SIGINT */
+  run_car();
 
   pthread_join(network_thread, NULL);
   pthread_join(signal_thread, NULL);

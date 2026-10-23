@@ -6,8 +6,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
-/* Applies one operation while the mutex is held.
-   Returns 1 if shared memory changed, 0 if not (an error was printed). */
+/* Mutex held. Returns 0 after printing an error. */
 static int apply(car_shared_mem *shm, const char *op, const char *floor_arg)
 {
   int current;
@@ -42,7 +41,7 @@ static int apply(car_shared_mem *shm, const char *op, const char *floor_arg)
       printf("Operation only allowed in service mode.\n");
       return 0;
     }
-    /* TODO: wording of the next two messages is not confirmed by the spec */
+    /* TODO: wording of these two messages is unconfirmed */
     if (strcmp(shm->status, "Between") == 0) {
       printf("Operation not allowed while elevator is moving.\n");
       return 0;
