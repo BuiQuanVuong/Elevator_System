@@ -680,8 +680,15 @@ static bool create_shared_memory(void)
   pthread_mutexattr_t mutex_attr;
   pthread_condattr_t cond_attr;
   car_shared_mem *shm;
-  int fd = shm_open(car.shm_name, O_CREAT | O_EXCL | O_RDWR, 0600);
+  int fd = shm_open(car.shm_name, O_RDWR, 0);
 
+  /* Refuse to take over another car with the same name */
+  if (fd != -1) {
+    printf("Car %s already exists.\n", car.name);
+    close(fd);
+    return false;
+  }
+  fd = shm_open(car.shm_name, O_CREAT | O_RDWR, 0600);
   if (fd == -1) {
     perror("shm_open()");
     return false;

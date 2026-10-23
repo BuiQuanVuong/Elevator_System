@@ -1,7 +1,6 @@
 #include "shared.h"
 
 #include <arpa/inet.h>
-#include <errno.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -97,9 +96,6 @@ static int send_all(int fd, const void *buf, size_t len)
   while (len > 0) {
     ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
     if (n == -1) {
-      if (errno == EINTR) {
-        continue;
-      }
       return -1;
     }
     p += n;
@@ -114,14 +110,8 @@ static int recv_all(int fd, void *buf, size_t len)
 
   while (len > 0) {
     ssize_t n = recv(fd, p, len, 0);
-    if (n == 0) {
-      return -1; /* disconnected */
-    }
-    if (n == -1) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return -1;
+    if (n <= 0) {
+      return -1; /* error or disconnected */
     }
     p += n;
     len -= (size_t)n;
