@@ -13,3 +13,4 @@ asgn2-testers/test/display-cars
 test-claude/test-claude/test-*
 !test-claude/test-claude/*.c
 submission.zip
+src/count.sh
